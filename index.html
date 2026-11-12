@@ -129,9 +129,8 @@
    * Data model
    *   item = {
    *     id, status: 'open' | 'done', createdAt, updatedAt,
-   *     product: { value, scannedAt } | null,   // first scan: the product/case details code
    *     photo:   'data:image/jpeg;base64,...' | null,
-   *     units:   [ { value, scannedAt } ]       // individual unit codes (e.g. each can)
+   *     codes:   [ { value, scannedAt } ]       // every QR code scanned for this item
    *   }
    * ===================================================================== */
 
@@ -187,7 +186,7 @@
 
   function newItem() {
     const t = now();
-    const item = { id: uid(), status: 'open', createdAt: t, updatedAt: t, product: null, photo: null, units: [] };
+    const item = { id: uid(), status: 'open', createdAt: t, updatedAt: t, photo: null, codes: [] };
     items.push(item);
     activeId = item.id;
     persist(item);
@@ -195,7 +194,20 @@
   }
 
   const ensureActive = () => active() || newItem();
-  const isEmpty = it => !it.product && !it.photo && !it.units.length;
+  const isEmpty = it => !it.photo && !it.codes.length;
+  const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+
+  // Older versions stored { product, units }; fold them into a single codes list.
+  function migrate(item) {
+    if (Array.isArray(item.codes) && !('product' in item) && !('units' in item)) return false;
+    const codes = Array.isArray(item.codes) ? item.codes : [];
+    if (item.product) codes.push(item.product);
+    if (Array.isArray(item.units)) codes.push(...item.units);
+    item.codes = codes;
+    delete item.product;
+    delete item.units;
+    return true;
+  }
 
   function finishActive() {
     const it = active();
@@ -237,23 +249,14 @@
 
     root.append(h('div', { class: 'row spread' },
       h('h2', {}, it ? 'Current item' : 'No item in progress'),
-      it && h('span', { class: 'pill' }, it.units.length + ' unit' + (it.units.length === 1 ? '' : 's'))
+      it && h('span', { class: 'pill' }, plural(it.codes.length, 'code'))
     ));
 
     if (!it) {
       root.append(h('p', { class: 'muted' },
-        'Scan a product code (or take a photo) to start a new item. The first code scanned is the product; every code after that is an individual unit.'));
+        'Scan one or more QR codes and/or take a photo to start an item.'));
       return;
     }
-
-    root.append(h('div', { class: 'field' },
-      h('div', { class: 'label' }, 'Product code'),
-      it.product
-        ? h('div', { class: 'row spread' },
-            h('div', { class: 'code' }, it.product.value),
-            h('button', { class: 'small', onclick: () => { it.product = null; persist(it); setStatus('Scan the product code.'); render(); } }, 'Re-scan'))
-        : h('div', { class: 'muted' }, 'Waiting for scan…')
-    ));
 
     root.append(h('div', { class: 'field' },
       h('div', { class: 'label' }, 'Photo'),
@@ -261,15 +264,15 @@
     ));
 
     const list = h('ol', { class: 'units' });
-    it.units.forEach((u, i) => list.append(h('li', {},
+    it.codes.forEach((c, i) => list.append(h('li', {},
       h('span', { class: 'n' }, String(i + 1) + '.'),
-      h('span', { class: 'code' }, u.value),
-      h('button', { class: 'small danger', 'aria-label': 'Remove ' + u.value,
-        onclick: () => { it.units.splice(i, 1); persist(it); render(); } }, '✕')
+      h('span', { class: 'code' }, c.value),
+      h('button', { class: 'small danger', 'aria-label': 'Remove ' + c.value,
+        onclick: () => { it.codes.splice(i, 1); persist(it); render(); } }, '✕')
     )));
     root.append(h('div', { class: 'field' },
-      h('div', { class: 'label' }, 'Units'),
-      it.units.length ? list : h('div', { class: 'muted' }, 'Scan each individual unit code.')
+      h('div', { class: 'label' }, 'Codes'),
+      it.codes.length ? list : h('div', { class: 'muted' }, 'Point the camera at a QR code.')
     ));
 
     root.append(h('div', { class: 'row field' },
@@ -295,15 +298,15 @@
         h('div', { class: 'head' },
           it.photo ? h('img', { class: 'thumb', src: it.photo, alt: '' }) : h('div', { class: 'thumb none' }, 'no photo'),
           h('div', { class: 'info' },
-            h('div', { class: 'code' }, it.product ? it.product.value : '(no product code)'),
+            h('div', { class: 'code' }, it.codes.length ? it.codes[0].value : '(photo only)'),
             h('div', { class: 'muted', style: 'font-size:.8rem' }, fmtTime(it.updatedAt))
           ),
-          h('span', { class: 'pill' }, it.units.length + ' unit' + (it.units.length === 1 ? '' : 's'))
+          h('span', { class: 'pill' }, plural(it.codes.length, 'code'))
         ),
-        it.units.length ? h('details', {},
-          h('summary', {}, 'Show units'),
-          h('ol', { class: 'units' }, ...it.units.map((u, i) => h('li', {},
-            h('span', { class: 'n' }, (i + 1) + '.'), h('span', { class: 'code' }, u.value))))
+        it.codes.length ? h('details', {},
+          h('summary', {}, 'Show codes'),
+          h('ol', { class: 'units' }, ...it.codes.map((c, i) => h('li', {},
+            h('span', { class: 'n' }, (i + 1) + '.'), h('span', { class: 'code' }, c.value))))
         ) : null,
         h('div', { class: 'row', style: 'margin-top:8px' },
           h('button', { class: 'small', onclick: () => { finishActive(); const t = items.find(x => x.id === it.id); t.status = 'open'; activeId = t.id; persist(t); render(); } }, 'Reopen'),
@@ -331,21 +334,15 @@
     if (navigator.vibrate) navigator.vibrate(ok ? 60 : [40, 40, 40]);
   }
 
-  // First code in an item = product; later codes = units (unique within and across items).
+  // Every scan is added to the current item; codes are unique within and across items.
   function applyScan(value) {
     const it = ensureActive();
-    if (!it.product) {
-      it.product = { value, scannedAt: now() };
-      persist(it);
-      return { ok: true, msg: 'Product: ' + value + ' — now scan the units' };
-    }
-    if (value === it.product.value) return { ok: false, msg: 'That is the product code (already set)' };
-    if (it.units.some(u => u.value === value)) return { ok: false, msg: 'Already scanned in this item: ' + value };
-    const other = items.find(o => o !== it && o.units.some(u => u.value === value));
-    if (other) return { ok: false, msg: 'Already recorded in another item (' + (other.product ? other.product.value : 'no product code') + '): ' + value };
-    it.units.push({ value, scannedAt: now() });
+    if (it.codes.some(c => c.value === value)) return { ok: false, msg: 'Already scanned in this item: ' + value };
+    const other = items.find(o => o !== it && o.codes.some(c => c.value === value));
+    if (other) return { ok: false, msg: 'Already recorded in another item: ' + value };
+    it.codes.push({ value, scannedAt: now() });
     persist(it);
-    return { ok: true, msg: 'Unit ' + it.units.length + ': ' + value };
+    return { ok: true, msg: 'Code ' + it.codes.length + ': ' + value };
   }
 
   function handleScan(value, manual) {
@@ -496,6 +493,7 @@
   render();
   dbAll().then(rows => {
     items = rows || [];
+    items.forEach(it => { if (migrate(it)) dbPut(it).catch(() => {}); });
     const open = items.filter(i => i.status === 'open').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
     activeId = open ? open.id : null;
     render();
